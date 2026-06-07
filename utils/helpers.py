@@ -131,7 +131,7 @@ def get_low_stock_items():
     low = []
     for s in sku_data:
         cur = float(s.get("current_stock", 0))
-        mn  = float(s.get("Min Stock Level", 0))
+        mn = float(s.get("Min Stock Level") or 0)
         if cur <= mn:
             low.append(s)
     return low
@@ -141,7 +141,7 @@ def get_inventory_worth():
     sku_data = fetch_all("sku_master")
     total = 0.0
     for s in sku_data:
-        cur   = float(s.get("current_stock", 0))
+        cur = float(s.get("current_stock") or 0)
         price = float(s.get("Market Price", 0))
         unit  = s.get("Purchase unit", "gm")
         if unit in ["gm", "ml"]:
