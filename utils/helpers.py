@@ -1,0 +1,205 @@
+import streamlit as st
+import pandas as pd
+from datetime import date, datetime
+from utils.db import fetch_all, fetch_where, insert_row, update_row, get_supabase
+
+# ── Bill Number Generator ──────────────────────────────────────────────────────
+def generate_bill_number():
+    orders = fetch_all("orders", order_col="id")
+    year = datetime.now().year
+    if not orders:
+        return f"LALALA-{year}-001"
+    last_bills = [o.get("bill_number", "") for o in orders if o.get("bill_number", "").startswith(f"LALALA-{year}-")]
+    if not last_bills:
+        return f"LALALA-{year}-001"
+    nums = []
+    for b in last_bills:
+        try:
+            nums.append(int(b.split("-")[-1]))
+        except:
+            pass
+    next_num = max(nums) + 1 if nums else 1
+    return f"LALALA-{year}-{str(next_num).zfill(3)}"
+
+# ── Customer Autofill ──────────────────────────────────────────────────────────
+def get_customer_by_phone(phone: str):
+    if not phone or len(phone) != 10:
+        return None
+    orders = fetch_all("orders")
+    for o in orders:
+        if str(o.get("phone_number", "")) == phone:
+            return o.get("customer_name", "")
+    return None
+
+def get_phone_by_name(name: str):
+    if not name:
+        return None
+    orders = fetch_all("orders")
+    name_lower = name.strip().lower()
+    for o in orders:
+        if str(o.get("customer_name", "")).strip().lower() == name_lower:
+            ph = o.get("phone_number", "")
+            if ph and ph != "N/A":
+                return ph
+    return None
+
+# ── BOM Cost Calculator ────────────────────────────────────────────────────────
+def get_bom_cost(dish_name: str):
+    bom_data = fetch_where("bom_master", "Dish Name", dish_name)
+    sku_data = fetch_all("sku_master")
+    sku_price_map = {s["Ingerdient Name"]: s.get("Market Price", 0) for s in sku_data}
+    sku_unit_map  = {s["Ingerdient Name"]: s.get("Purchase unit", "gm") for s in sku_data}
+    total_cost = 0.0
+    for item in bom_data:
+        ingredient = item.get("Ingerdient Name", "")
+        req_qty    = float(item.get("Required quantity", 0))
+        unit       = item.get("Unit", "gm")
+        market_price = float(sku_price_map.get(ingredient, 0))
+        sku_unit     = sku_unit_map.get(ingredient, "gm")
+        # price per base unit
+        if sku_unit == "gm":
+            price_per_unit = market_price / 1000 if market_price else 0
+        elif sku_unit == "ml":
+            price_per_unit = market_price / 1000 if market_price else 0
+        elif sku_unit == "kg":
+            price_per_unit = market_price / 1000 if market_price else 0
+        elif sku_unit == "litre":
+            price_per_unit = market_price / 1000 if market_price else 0
+        else:
+            price_per_unit = market_price
+        # convert req_qty to base unit
+        if unit in ["gm", "ml"]:
+            qty_base = req_qty
+        elif unit in ["kg", "litre"]:
+            qty_base = req_qty * 1000
+        elif unit == "nos":
+            qty_base = req_qty
+        else:
+            qty_base = req_qty
+        total_cost += price_per_unit * qty_base
+    return round(total_cost, 2)
+
+# ── Stock Deduction via BOM ────────────────────────────────────────────────────
+def deduct_stock_via_bom(dish_name: str, ordered_qty: float, reason: str = "sale"):
+    bom_data = fetch_where("bom_master", "Dish Name", dish_name)
+    sku_data = fetch_all("sku_master")
+    sku_map  = {s["Ingerdient Name"]: s for s in sku_data}
+    errors   = []
+    for item in bom_data:
+        ingredient = item.get("Ingerdient Name", "")
+        req_qty    = float(item.get("Required quantity", 0)) * ordered_qty
+        unit       = item.get("Unit", "gm")
+        sku = sku_map.get(ingredient)
+        if not sku:
+            errors.append(f"{ingredient} — SKU not found")
+            continue
+        current = float(sku.get("current_stock", 0))
+        # normalize to gm/ml/nos
+        if unit in ["kg", "litre"]:
+            req_qty_norm = req_qty * 1000
+        else:
+            req_qty_norm = req_qty
+        new_stock = max(0, current - req_qty_norm)
+        update_row("sku_master", "Ingerdient Name", ingredient, {"current_stock": round(new_stock, 3)})
+    return errors
+
+# ── Add Stock (Purchase) ───────────────────────────────────────────────────────
+def add_stock_purchase(ingredient: str, qty: float, unit: str, price_per_unit: float):
+    sku_data = fetch_where("sku_master", "Ingerdient Name", ingredient)
+    if not sku_data:
+        return False
+    sku = sku_data[0]
+    current = float(sku.get("current_stock", 0))
+    sku_unit = sku.get("Purchase unit", "gm")
+    # normalize incoming qty to sku base unit
+    if unit == "kg" and sku_unit == "gm":
+        qty_norm = qty * 1000
+    elif unit == "litre" and sku_unit == "ml":
+        qty_norm = qty * 1000
+    else:
+        qty_norm = qty
+    new_stock = current + qty_norm
+    update_row("sku_master", "Ingerdient Name", ingredient, {
+        "current_stock": round(new_stock, 3),
+        "Market Price": price_per_unit
+    })
+    return True
+
+# ── Low Stock Items ────────────────────────────────────────────────────────────
+def get_low_stock_items():
+    sku_data = fetch_all("sku_master")
+    low = []
+    for s in sku_data:
+        cur = float(s.get("current_stock", 0))
+        mn  = float(s.get("Min Stock Level", 0))
+        if cur <= mn:
+            low.append(s)
+    return low
+
+# ── Total Inventory Worth ──────────────────────────────────────────────────────
+def get_inventory_worth():
+    sku_data = fetch_all("sku_master")
+    total = 0.0
+    for s in sku_data:
+        cur   = float(s.get("current_stock", 0))
+        price = float(s.get("Market Price", 0))
+        unit  = s.get("Purchase unit", "gm")
+        if unit in ["gm", "ml"]:
+            worth = (cur / 1000) * price
+        else:
+            worth = cur * price
+        total += worth
+    return round(total, 2)
+
+# ── Bill HTML Generator ────────────────────────────────────────────────────────
+def generate_bill_html(bill_data: dict, cart_items: list) -> str:
+    rows = ""
+    subtotal = 0
+    for i, item in enumerate(cart_items, 1):
+        amt = item["qty"] * item["price"]
+        subtotal += amt
+        rows += f"""<tr>
+          <td style='padding:6px 8px;border-bottom:1px solid #eee'>{i}</td>
+          <td style='padding:6px 8px;border-bottom:1px solid #eee'>{item['dish']}</td>
+          <td style='padding:6px 8px;border-bottom:1px solid #eee;text-align:center'>{item['qty']}</td>
+          <td style='padding:6px 8px;border-bottom:1px solid #eee;text-align:right'>₹{item['price']:.0f}</td>
+          <td style='padding:6px 8px;border-bottom:1px solid #eee;text-align:right'>₹{amt:.0f}</td>
+        </tr>"""
+    html = f"""<!DOCTYPE html>
+<html><head><meta charset='UTF-8'>
+<style>
+  body{{font-family:Arial,sans-serif;max-width:420px;margin:auto;padding:20px;color:#222}}
+  h2{{text-align:center;color:#e65c00;margin:0}}
+  .sub{{text-align:center;color:#888;font-size:12px;margin-bottom:16px}}
+  table{{width:100%;border-collapse:collapse;font-size:13px}}
+  th{{background:#e65c00;color:#fff;padding:8px;text-align:left}}
+  .total{{font-size:16px;font-weight:bold;text-align:right;padding:10px 8px}}
+  .footer{{text-align:center;margin-top:20px;font-size:11px;color:#aaa}}
+  .info{{font-size:12px;margin-bottom:12px;line-height:1.8}}
+</style></head><body>
+<h2>🍽️ LALALA Cloud Kitchen</h2>
+<div class='sub'>Signature Kitchen</div>
+<hr/>
+<div class='info'>
+  <b>Bill No:</b> {bill_data.get('bill_number','')}<br/>
+  <b>Date:</b> {bill_data.get('date','')}<br/>
+  <b>Customer:</b> {bill_data.get('customer_name','')}<br/>
+  <b>Phone:</b> {bill_data.get('phone_number','')}<br/>
+  <b>Platform:</b> {bill_data.get('platform','')}<br/>
+  <b>Payment:</b> {bill_data.get('payment_mode','')}
+</div>
+<table>
+  <tr><th>#</th><th>Item</th><th>Qty</th><th>Rate</th><th>Amount</th></tr>
+  {rows}
+  <tr><td colspan='4' class='total'>Total</td><td class='total'>₹{subtotal:.0f}</td></tr>
+</table>
+<div class='footer'>Thank you for your order! 🙏<br/>LALALA Cloud Kitchen</div>
+</body></html>"""
+    return html
+
+def whatsapp_share_url(phone: str, bill_number: str, amount: float) -> str:
+    if not phone or phone == "N/A":
+        return ""
+    clean_phone = "91" + phone.strip()
+    msg = f"Hi! Your order at LALALA Cloud Kitchen is confirmed 🍽️%0ABill No: {bill_number}%0AAmount: ₹{amount:.0f}%0AThank you!"
+    return f"https://wa.me/{clean_phone}?text={msg}"
