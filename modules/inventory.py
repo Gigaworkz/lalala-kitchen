@@ -35,7 +35,7 @@ def inventory_page():
             cur = float(row.get("current_stock", 0))
             mn  = float(row.get("Min Stock Level", 0))
             if cur <= mn:
-                return ["background-color: #ffe5e5"] * len(row)
+                return ["background-color: #8B0000; color: white"] * len(row)
         except:
             pass
         return [""] * len(row)
