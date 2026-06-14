@@ -36,7 +36,7 @@ with st.sidebar:
     st.markdown("**🍽️ Cloud Kitchen 👨‍🍳**")
     st.markdown("**🍟🍔🥟 Good Food**")
     st.markdown("**🌾 Sig-Nature Feel 🌱**")
-    st.markdown("**🟩 Pure VEG **")
+    st.markdown("**🟩 Pure VEG**")
     st.divider()
 
     page = st.radio("Navigation", [
@@ -46,6 +46,7 @@ with st.sidebar:
 
     st.divider()
     st.caption("LALALA Cloud Kitchen © 2026")
+    st.caption("Powerd by Gigaworkz")
 
 # ── Billing Counter (Public) ──────────────────────────────────────────────────
 if page == "🧾 Billing Counter":
