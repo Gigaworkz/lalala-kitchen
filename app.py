@@ -75,7 +75,7 @@ elif page == "🔐 Admin Panel":
                     st.error("❌ Wrong password")
         # Skip password option
         st.divider()
-        if st.button("🚪 Enter without password (Dev mode)"):
+        if st.button("🚪 Enter without password (Emrg mode)"):
             st.session_state.admin_logged_in = True
             st.rerun()
     else:
