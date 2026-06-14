@@ -32,9 +32,9 @@ from modules.reports   import reports_page
 
 # ── Sidebar Navigation ────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("# 🍽️ LALALA Cloud Kitchen")
-    st.markdown("**🍟🍔🥟 Good Food | 🌾 Sig-Nature Feel**")
-    st.markdown("** 🌾 Sig-Nature Feel**")
+    st.markdown("#LALALA")
+    st.markdown("**🍽️ Cloud Kitchen 👨‍🍳**")
+    st.markdown("**🍟🍔🥟 Good Food | 🌾 Sig-Nature Feel | 🟩 Pure VEG 🌱**")
     st.divider()
 
     page = st.radio("Navigation", [
