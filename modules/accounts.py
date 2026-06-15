@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from datetime import date
+from datetime import date, timedelta
 from utils.db import fetch_all, insert_row, update_row
 from utils.helpers import add_stock_purchase
 
@@ -160,15 +160,29 @@ def accounts_page():
     # ── Channel Payout Settlements ────────────────────────────────────────────
     elif tab == "📱 Channel Payout Settlements":
         st.markdown("### 📱 Platform Payout Settlement")
-        st.caption("Swiggy/Zomato bank payout vs orders compare panni commission calculate pannum")
+        st.caption("Swiggy/Zomato settlement Wednesday select pannunga — sale window automatic aa calculate aagum")
 
         col1, col2 = st.columns(2)
         with col1:
-            from_date = st.date_input("From Date", key="pay_from")
+            platform_sel = st.selectbox("Platform", ["Swiggy", "Zomato"], key="pay_platform")
         with col2:
-            to_date = st.date_input("To Date", value=date.today(), key="pay_to")
+            settlement_date = st.date_input("📅 Settlement Date (Wednesday)", value=date.today(), key="pay_settle_date")
 
-        platform_sel = st.selectbox("Platform", ["Swiggy", "Zomato"], key="pay_platform")
+        if settlement_date.weekday() != 2:  # Monday=0 ... Wednesday=2
+            st.warning("⚠️ Settlement date Wednesday ah select pannunga (Swiggy/Zomato Wednesday than settle pannuvanga)")
+
+        # ── Auto-calculate sale window based on platform pattern ─────────────────
+        if platform_sel == "Swiggy":
+            # Sun-Sat sales -> next Wednesday settlement (4 days after Saturday)
+            from_date = settlement_date - timedelta(days=10)  # Sunday
+            to_date   = settlement_date - timedelta(days=4)   # Saturday
+        else:  # Zomato
+            # Mon-Sun sales -> next Wednesday settlement (3 days after Sunday)
+            from_date = settlement_date - timedelta(days=9)   # Monday
+            to_date   = settlement_date - timedelta(days=3)   # Sunday
+
+        st.info(f"🗓️ Sale Window: **{from_date.strftime('%d-%b (%a)')} → {to_date.strftime('%d-%b (%a)')}** "
+                f"({(to_date - from_date).days + 1} days) → Settlement on **{settlement_date.strftime('%d-%b (%a)')}**")
 
         orders = fetch_all("orders")
         filtered = [o for o in orders if
@@ -194,25 +208,25 @@ def accounts_page():
             if st.button(f"✅ Record {platform_sel} Payout Settlement", type="primary", use_container_width=True):
                 # Revenue entry
                 insert_row("accounts", {
-                    "date": str(to_date),
+                    "date": str(settlement_date),
                     "type": "Revenue",
                     "category": f"{platform_sel} Payout",
                     "item_name": f"{platform_sel} Settlement",
                     "amount": bank_payout,
                     "qty": num_orders,
                     "unit": "orders",
-                    "notes": f"Orders: ₹{total_order_value:.2f} | Commission: ₹{commission:.2f} ({comm_pct:.1f}%)"
+                    "notes": f"Sales {from_date} to {to_date} | Orders: ₹{total_order_value:.2f} | Commission: ₹{commission:.2f} ({comm_pct:.1f}%)"
                 })
                 # Commission expense entry
                 insert_row("accounts", {
-                    "date": str(to_date),
+                    "date": str(settlement_date),
                     "type": "Expense",
                     "category": "Platform Commission",
                     "item_name": f"{platform_sel} Commission",
                     "amount": commission,
                     "qty": num_orders,
                     "unit": "orders",
-                    "notes": f"{from_date} to {to_date} | {comm_pct:.1f}% commission"
+                    "notes": f"Sales {from_date} to {to_date} | {comm_pct:.1f}% commission"
                 })
                 st.success(f"✅ {platform_sel} settlement recorded! Revenue: ₹{bank_payout:.2f}, Commission: ₹{commission:.2f}")
 
