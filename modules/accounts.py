@@ -32,15 +32,21 @@ def accounts_page():
             qty_purchased = st.number_input("Quantity", min_value=0.0, step=0.1, key="pur_qty")
             unit_selected = st.selectbox("Unit", ["gm", "ml", "kg", "litre", "nos"], key="pur_unit")
 
-        purchase_price = st.number_input("💰 Purchase Price (₹ per unit as selected)", min_value=0.0, step=1.0, key="pur_price")
+        total_amount = st.number_input("💰 Total Amount Paid (₹)", min_value=0.0, step=1.0, key="pur_price",
+                                        help="Total bill amount for this purchase (e.g. 200gm vanginal total ₹55 nu kudunga)")
+        if qty_purchased > 0:
+            calc_rate = total_amount / qty_purchased
+            st.caption(f"≈ ₹{calc_rate:.2f} per {unit_selected}")
         notes_pur = st.text_input("📝 Notes (optional)", key="pur_notes")
 
         if st.button("✅ Submit Purchase", type="primary", use_container_width=True):
-            if item_selected and qty_purchased > 0 and purchase_price >= 0:
+            if item_selected and qty_purchased > 0 and total_amount >= 0:
+                # Calculate price per unit for market price tracking
+                price_per_unit = total_amount / qty_purchased
                 # Add stock
-                add_stock_purchase(item_selected, qty_purchased, unit_selected, purchase_price)
-                # Record expense
-                total_cost = qty_purchased * purchase_price
+                add_stock_purchase(item_selected, qty_purchased, unit_selected, price_per_unit)
+                # Record expense — total amount actually paid
+                total_cost = total_amount
                 insert_row("accounts", {
                     "date": str(purchase_date),
                     "type": "Expense",
@@ -49,7 +55,7 @@ def accounts_page():
                     "amount": round(total_cost, 2),
                     "qty": qty_purchased,
                     "unit": unit_selected,
-                    "notes": notes_pur or f"Purchase: {qty_purchased}{unit_selected} @ ₹{purchase_price}"
+                    "notes": notes_pur or f"Purchase: {qty_purchased}{unit_selected} for total ₹{total_amount}"
                 })
                 st.success(f"✅ {item_selected} — {qty_purchased} {unit_selected} added to stock. Expense ₹{total_cost:.2f} recorded.")
             else:
