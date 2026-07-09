@@ -43,40 +43,64 @@ def get_phone_by_name(name: str):
                 return ph
     return None
 
+# ── Base Unit Helpers ───────────────────────────────────────────────────────────
+# current_stock and Market Price are ALWAYS stored in a base unit: gm, ml, or nos.
+# kg / litre are purchase-time convenience units only — they get converted to
+# base unit immediately and are never stored anywhere in SKU/BOM/stock logic.
+BASE_UNITS = ("gm", "ml", "nos")
+
+def normalize_base_unit(unit: str) -> str:
+    """Map any unit (including legacy kg/litre saved in old rows) to its
+    correct base unit — gm, ml, or nos. Self-heals old SKU data over time."""
+    u = (unit or "gm").strip().lower()
+    if u in ("kg", "gm"):
+        return "gm"
+    if u in ("litre", "liter", "l", "ml"):
+        return "ml"
+    return "nos"
+
+def get_purchase_unit_options(base_unit: str):
+    """Units the Purchase Entry UI should offer for a given ingredient,
+    based on its base unit. No free unit choice — only conversions that
+    make sense for that base unit are shown."""
+    base_unit = normalize_base_unit(base_unit)
+    if base_unit == "gm":
+        return ["gm", "kg"]
+    if base_unit == "ml":
+        return ["ml", "litre"]
+    return ["nos"]
+
+def convert_to_base_qty(qty: float, entry_unit: str, base_unit: str) -> float:
+    """Convert a quantity entered in entry_unit (gm/kg/ml/litre/nos) into the
+    ingredient's base unit (gm/ml/nos). This is the single place unit
+    conversion happens — every other function should call this instead of
+    re-implementing kg/litre math."""
+    base_unit = normalize_base_unit(base_unit)
+    entry_unit = (entry_unit or base_unit).strip().lower()
+    if base_unit == "nos":
+        return qty
+    if base_unit == "gm":
+        return qty * 1000 if entry_unit == "kg" else qty
+    if base_unit == "ml":
+        return qty * 1000 if entry_unit == "litre" else qty
+    return qty
+
 # ── BOM Cost Calculator ────────────────────────────────────────────────────────
 def get_bom_cost(dish_name: str):
     bom_data = fetch_where("bom_master", "Dish Name", dish_name)
     sku_data = fetch_all("sku_master")
-    sku_price_map = {s["Ingerdient Name"]: s.get("Market Price", 0) for s in sku_data}
-    sku_unit_map  = {s["Ingerdient Name"]: s.get("Purchase unit", "gm") for s in sku_data}
+    sku_price_map = {s["Ingerdient Name"]: float(s.get("Market Price", 0) or 0) for s in sku_data}
+    sku_base_map  = {s["Ingerdient Name"]: normalize_base_unit(s.get("Purchase unit", "gm")) for s in sku_data}
     total_cost = 0.0
     for item in bom_data:
         ingredient = item.get("Ingerdient Name", "")
         req_qty    = float(item.get("Required quantity", 0))
         unit       = item.get("Unit", "gm")
-        market_price = float(sku_price_map.get(ingredient, 0))
-        sku_unit     = sku_unit_map.get(ingredient, "gm")
-        # price per base unit
-        if sku_unit == "gm":
-            price_per_unit = market_price / 1000 if market_price else 0
-        elif sku_unit == "ml":
-            price_per_unit = market_price / 1000 if market_price else 0
-        elif sku_unit == "kg":
-            price_per_unit = market_price / 1000 if market_price else 0
-        elif sku_unit == "litre":
-            price_per_unit = market_price / 1000 if market_price else 0
-        else:
-            price_per_unit = market_price
-        # convert req_qty to base unit
-        if unit in ["gm", "ml"]:
-            qty_base = req_qty
-        elif unit in ["kg", "litre"]:
-            qty_base = req_qty * 1000
-        elif unit == "nos":
-            qty_base = req_qty
-        else:
-            qty_base = req_qty
-        total_cost += price_per_unit * qty_base
+        base_unit  = sku_base_map.get(ingredient, "gm")
+        # Market Price is always per base unit already — no /1000 needed
+        price_per_base_unit = sku_price_map.get(ingredient, 0)
+        qty_in_base = convert_to_base_qty(req_qty, unit, base_unit)
+        total_cost += price_per_base_unit * qty_in_base
     return round(total_cost, 2)
 
 # ── Stock Deduction via BOM ────────────────────────────────────────────────────
@@ -93,37 +117,40 @@ def deduct_stock_via_bom(dish_name: str, ordered_qty: float, reason: str = "sale
         if not sku:
             errors.append(f"{ingredient} — SKU not found")
             continue
-        current = float(sku.get("current_stock", 0))
-        # normalize to gm/ml/nos
-        if unit in ["kg", "litre"]:
-            req_qty_norm = req_qty * 1000
-        else:
-            req_qty_norm = req_qty
-        new_stock = max(0, current - req_qty_norm)
+        base_unit = normalize_base_unit(sku.get("Purchase unit", "gm"))
+        current = float(sku.get("current_stock", 0) or 0)
+        req_qty_base = convert_to_base_qty(req_qty, unit, base_unit)
+        new_stock = max(0, current - req_qty_base)
         update_row("sku_master", "Ingerdient Name", ingredient, {"current_stock": round(new_stock, 3)})
     return errors
 
 # ── Add Stock (Purchase) ───────────────────────────────────────────────────────
-def add_stock_purchase(ingredient: str, qty: float, unit: str, price_per_unit: float):
+def add_stock_purchase(ingredient: str, qty: float, unit: str, total_amount: float):
+    """qty/unit = whatever the user entered at purchase time (gm/kg/ml/litre/nos).
+    total_amount = total ₹ paid for that purchase.
+    Converts qty to the ingredient's base unit (gm/ml/nos), adds it to
+    current_stock, and stores Market Price as ₹ per base unit.
+    Returns (success, qty_in_base_unit, base_unit)."""
     sku_data = fetch_where("sku_master", "Ingerdient Name", ingredient)
     if not sku_data:
-        return False
+        return False, 0, ""
     sku = sku_data[0]
-    current = float(sku.get("current_stock", 0))
-    sku_unit = sku.get("Purchase unit", "gm")
-    # normalize incoming qty to sku base unit
-    if unit == "kg" and sku_unit == "gm":
-        qty_norm = qty * 1000
-    elif unit == "litre" and sku_unit == "ml":
-        qty_norm = qty * 1000
-    else:
-        qty_norm = qty
-    new_stock = current + qty_norm
+    base_unit = normalize_base_unit(sku.get("Purchase unit", "gm"))
+    current = float(sku.get("current_stock", 0) or 0)
+
+    qty_base = convert_to_base_qty(qty, unit, base_unit)
+    if qty_base <= 0:
+        return False, 0, base_unit
+
+    price_per_base_unit = total_amount / qty_base
+    new_stock = current + qty_base
+
     update_row("sku_master", "Ingerdient Name", ingredient, {
         "current_stock": round(new_stock, 3),
-        "Market Price": price_per_unit
+        "Market Price": round(price_per_base_unit, 4),
+        "Purchase unit": base_unit,  # self-heals any legacy kg/litre value
     })
-    return True
+    return True, qty_base, base_unit
 
 # ── Low Stock Items ────────────────────────────────────────────────────────────
 def get_low_stock_items():
@@ -136,19 +163,16 @@ def get_low_stock_items():
             low.append(s)
     return low
 
-# ── Total Inventory Worth ──────────────────────────────────────────────────────
 def get_inventory_worth():
+    """current_stock and Market Price are both always per base unit
+    (gm/ml/nos), so this is a plain multiplication — no /1000 conversion
+    needed anywhere."""
     sku_data = fetch_all("sku_master")
     total = 0.0
     for s in sku_data:
         cur = float(s.get("current_stock") or 0)
-        price = float(s.get("Market Price", 0))
-        unit  = s.get("Purchase unit", "gm")
-        if unit in ["gm", "ml"]:
-            worth = (cur / 1000) * price
-        else:
-            worth = cur * price
-        total += worth
+        price = float(s.get("Market Price", 0) or 0)
+        total += cur * price
     return round(total, 2)
 
 # ── Bill HTML Generator ────────────────────────────────────────────────────────
