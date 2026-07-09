@@ -1,229 +1,264 @@
 import streamlit as st
 import pandas as pd
-from datetime import date, datetime
-from utils.db import fetch_all, fetch_where, insert_row, update_row, get_supabase
+from datetime import date, timedelta
+from utils.db import fetch_all, insert_row, update_row
+from utils.helpers import add_stock_purchase, normalize_base_unit, get_purchase_unit_options, convert_to_base_qty
 
-# ── Bill Number Generator ──────────────────────────────────────────────────────
-def generate_bill_number():
-    orders = fetch_all("orders", order_col="id")
-    year = datetime.now().year
-    if not orders:
-        return f"LALALA-{year}-001"
-    last_bills = [o.get("bill_number", "") for o in orders if o.get("bill_number", "").startswith(f"LALALA-{year}-")]
-    if not last_bills:
-        return f"LALALA-{year}-001"
-    nums = []
-    for b in last_bills:
-        try:
-            nums.append(int(b.split("-")[-1]))
-        except:
-            pass
-    next_num = max(nums) + 1 if nums else 1
-    return f"LALALA-{year}-{str(next_num).zfill(3)}"
+def accounts_page():
+    st.markdown("## 💰 Accounts Entry Panel")
 
-# ── Customer Autofill ──────────────────────────────────────────────────────────
-def get_customer_by_phone(phone: str):
-    if not phone or len(phone) != 10:
-        return None
-    orders = fetch_all("orders")
-    for o in orders:
-        if str(o.get("phone_number", "")) == phone:
-            return o.get("customer_name", "")
-    return None
+    tab = st.radio("Select Entry Type", [
+        "📦 Purchase Entry",
+        "🏢 Fixed Expenses",
+        "💳 Pending Credit Dashboard",
+        "📱 Channel Payout Settlements"
+    ], horizontal=True)
 
-def get_phone_by_name(name: str):
-    if not name:
-        return None
-    orders = fetch_all("orders")
-    name_lower = name.strip().lower()
-    for o in orders:
-        if str(o.get("customer_name", "")).strip().lower() == name_lower:
-            ph = o.get("phone_number", "")
-            if ph and ph != "N/A":
-                return ph
-    return None
+    st.divider()
 
-# ── Base Unit Helpers ───────────────────────────────────────────────────────────
-# current_stock and Market Price are ALWAYS stored in a base unit: gm, ml, or nos.
-# kg / litre are purchase-time convenience units only — they get converted to
-# base unit immediately and are never stored anywhere in SKU/BOM/stock logic.
-BASE_UNITS = ("gm", "ml", "nos")
+    # ── Purchase Entry ────────────────────────────────────────────────────────
+    if tab == "📦 Purchase Entry":
+        st.markdown("### 📦 Purchase Entry")
+        st.caption("Raw material vanginal — stock add aagum, market price update aagum, expense record aagum")
 
-def normalize_base_unit(unit: str) -> str:
-    """Map any unit (including legacy kg/litre saved in old rows) to its
-    correct base unit — gm, ml, or nos. Self-heals old SKU data over time."""
-    u = (unit or "gm").strip().lower()
-    if u in ("kg", "gm"):
-        return "gm"
-    if u in ("litre", "liter", "l", "ml"):
-        return "ml"
-    return "nos"
+        sku_data = fetch_all("sku_master")
+        sku_names = [s["Ingerdient Name"] for s in sku_data if s.get("Ingerdient Name")]
+        sku_map   = {s["Ingerdient Name"]: s for s in sku_data}
 
-def get_purchase_unit_options(base_unit: str):
-    """Units the Purchase Entry UI should offer for a given ingredient,
-    based on its base unit. No free unit choice — only conversions that
-    make sense for that base unit are shown."""
-    base_unit = normalize_base_unit(base_unit)
-    if base_unit == "gm":
-        return ["gm", "kg"]
-    if base_unit == "ml":
-        return ["ml", "litre"]
-    return ["nos"]
+        col1, col2 = st.columns(2)
+        with col1:
+            purchase_date = st.date_input("📅 Purchase Date", value=date.today(), key="pur_date")
+            item_selected = st.selectbox("🧂 Select Ingredient", sku_names, key="pur_item")
 
-def convert_to_base_qty(qty: float, entry_unit: str, base_unit: str) -> float:
-    """Convert a quantity entered in entry_unit (gm/kg/ml/litre/nos) into the
-    ingredient's base unit (gm/ml/nos). This is the single place unit
-    conversion happens — every other function should call this instead of
-    re-implementing kg/litre math."""
-    base_unit = normalize_base_unit(base_unit)
-    entry_unit = (entry_unit or base_unit).strip().lower()
-    if base_unit == "nos":
-        return qty
-    if base_unit == "gm":
-        return qty * 1000 if entry_unit == "kg" else qty
-    if base_unit == "ml":
-        return qty * 1000 if entry_unit == "litre" else qty
-    return qty
+        # Base unit is fixed per ingredient (gm/ml/nos) — user can only pick a
+        # convenience unit that converts cleanly into it (e.g. kg for a gm item,
+        # litre for an ml item). No mismatched unit can ever be selected.
+        base_unit    = normalize_base_unit(sku_map.get(item_selected, {}).get("Purchase unit", "gm")) if item_selected else "gm"
+        unit_options = get_purchase_unit_options(base_unit)
 
-# ── BOM Cost Calculator ────────────────────────────────────────────────────────
-def get_bom_cost(dish_name: str):
-    bom_data = fetch_where("bom_master", "Dish Name", dish_name)
-    sku_data = fetch_all("sku_master")
-    sku_price_map = {s["Ingerdient Name"]: float(s.get("Market Price", 0) or 0) for s in sku_data}
-    sku_base_map  = {s["Ingerdient Name"]: normalize_base_unit(s.get("Purchase unit", "gm")) for s in sku_data}
-    total_cost = 0.0
-    for item in bom_data:
-        ingredient = item.get("Ingerdient Name", "")
-        req_qty    = float(item.get("Required quantity", 0))
-        unit       = item.get("Unit", "gm")
-        base_unit  = sku_base_map.get(ingredient, "gm")
-        # Market Price is always per base unit already — no /1000 needed
-        price_per_base_unit = sku_price_map.get(ingredient, 0)
-        qty_in_base = convert_to_base_qty(req_qty, unit, base_unit)
-        total_cost += price_per_base_unit * qty_in_base
-    return round(total_cost, 2)
+        with col2:
+            qty_purchased = st.number_input("Quantity", min_value=0.0, step=0.1, key="pur_qty")
+            unit_selected = st.selectbox("Unit", unit_options, key="pur_unit")
 
-# ── Stock Deduction via BOM ────────────────────────────────────────────────────
-def deduct_stock_via_bom(dish_name: str, ordered_qty: float, reason: str = "sale"):
-    bom_data = fetch_where("bom_master", "Dish Name", dish_name)
-    sku_data = fetch_all("sku_master")
-    sku_map  = {s["Ingerdient Name"]: s for s in sku_data}
-    errors   = []
-    for item in bom_data:
-        ingredient = item.get("Ingerdient Name", "")
-        req_qty    = float(item.get("Required quantity", 0)) * ordered_qty
-        unit       = item.get("Unit", "gm")
-        sku = sku_map.get(ingredient)
-        if not sku:
-            errors.append(f"{ingredient} — SKU not found")
-            continue
-        base_unit = normalize_base_unit(sku.get("Purchase unit", "gm"))
-        current = float(sku.get("current_stock", 0) or 0)
-        req_qty_base = convert_to_base_qty(req_qty, unit, base_unit)
-        new_stock = max(0, current - req_qty_base)
-        update_row("sku_master", "Ingerdient Name", ingredient, {"current_stock": round(new_stock, 3)})
-    return errors
+        st.caption(f"📦 Stock tracked in base unit: **{base_unit}** for this ingredient")
 
-# ── Add Stock (Purchase) ───────────────────────────────────────────────────────
-def add_stock_purchase(ingredient: str, qty: float, unit: str, total_amount: float):
-    """qty/unit = whatever the user entered at purchase time (gm/kg/ml/litre/nos).
-    total_amount = total ₹ paid for that purchase.
-    Converts qty to the ingredient's base unit (gm/ml/nos), adds it to
-    current_stock, and stores Market Price as ₹ per base unit.
-    Returns (success, qty_in_base_unit, base_unit)."""
-    sku_data = fetch_where("sku_master", "Ingerdient Name", ingredient)
-    if not sku_data:
-        return False, 0, ""
-    sku = sku_data[0]
-    base_unit = normalize_base_unit(sku.get("Purchase unit", "gm"))
-    current = float(sku.get("current_stock", 0) or 0)
+        total_amount = st.number_input("💰 Total Amount Paid (₹)", min_value=0.0, step=1.0, key="pur_price",
+                                        help="Total bill amount for this purchase (e.g. 5 litre Oil vanginal total ₹795 nu kudunga)")
 
-    qty_base = convert_to_base_qty(qty, unit, base_unit)
-    if qty_base <= 0:
-        return False, 0, base_unit
+        qty_base_preview = 0
+        if qty_purchased > 0 and total_amount > 0:
+            qty_base_preview = convert_to_base_qty(qty_purchased, unit_selected, base_unit)
+            rate_preview = total_amount / qty_base_preview if qty_base_preview else 0
+            st.caption(f"≈ {qty_base_preview:.0f} {base_unit} stock add aagum · ₹{rate_preview:.3f} per {base_unit}")
 
-    price_per_base_unit = total_amount / qty_base
-    new_stock = current + qty_base
+        notes_pur = st.text_input("📝 Notes (optional)", key="pur_notes")
 
-    update_row("sku_master", "Ingerdient Name", ingredient, {
-        "current_stock": round(new_stock, 3),
-        "Market Price": round(price_per_base_unit, 4),
-        "Purchase unit": base_unit,  # self-heals any legacy kg/litre value
-    })
-    return True, qty_base, base_unit
+        if st.button("✅ Submit Purchase", type="primary", use_container_width=True):
+            if item_selected and qty_purchased > 0 and total_amount >= 0:
+                success, qty_base, saved_base_unit = add_stock_purchase(
+                    item_selected, qty_purchased, unit_selected, total_amount
+                )
+                if success:
+                    # Ledger entry logged in base unit too — kg/litre never
+                    # appear anywhere in stored data, only in the UI at entry time.
+                    insert_row("accounts", {
+                        "date": str(purchase_date),
+                        "type": "Expense",
+                        "category": "Purchase",
+                        "item_name": item_selected,
+                        "amount": round(total_amount, 2),
+                        "qty": round(qty_base, 3),
+                        "unit": saved_base_unit,
+                        "notes": notes_pur or f"Purchase: {qty_purchased}{unit_selected} ({qty_base:.0f}{saved_base_unit}) for total ₹{total_amount}"
+                    })
+                    st.success(f"✅ {item_selected} — {qty_purchased}{unit_selected} = {qty_base:.0f}{saved_base_unit} added to stock. Expense ₹{total_amount:.2f} recorded.")
+                else:
+                    st.error("⚠️ Stock update failed — ingredient not found or invalid quantity")
+            else:
+                st.warning("⚠️ All fields required")
 
-# ── Low Stock Items ────────────────────────────────────────────────────────────
-def get_low_stock_items():
-    sku_data = fetch_all("sku_master")
-    low = []
-    for s in sku_data:
-        cur = float(s.get("current_stock", 0))
-        mn = float(s.get("Min Stock Level") or 0)
-        if cur <= mn:
-            low.append(s)
-    return low
+    # ── Fixed Expenses ────────────────────────────────────────────────────────
+    elif tab == "🏢 Fixed Expenses":
+        st.markdown("### 🏢 Fixed Expenses")
+        col1, col2 = st.columns(2)
+        with col1:
+            exp_date = st.date_input("📅 Date", value=date.today(), key="fix_date")
+            exp_cat  = st.selectbox("Category", ["Rent", "EB Bill", "Salary", "Transport", "Other"], key="fix_cat")
+        with col2:
+            exp_amount = st.number_input("Amount (₹)", min_value=0.0, step=10.0, key="fix_amt")
+            exp_notes  = st.text_input("📝 Notes", key="fix_notes")
 
-def get_inventory_worth():
-    """current_stock and Market Price are both always per base unit
-    (gm/ml/nos), so this is a plain multiplication — no /1000 conversion
-    needed anywhere."""
-    sku_data = fetch_all("sku_master")
-    total = 0.0
-    for s in sku_data:
-        cur = float(s.get("current_stock") or 0)
-        price = float(s.get("Market Price", 0) or 0)
-        total += cur * price
-    return round(total, 2)
+        if st.button("💾 Save Expense", type="primary", use_container_width=True):
+            if exp_amount > 0:
+                insert_row("accounts", {
+                    "date": str(exp_date),
+                    "type": "Expense",
+                    "category": exp_cat,
+                    "item_name": exp_cat,
+                    "amount": exp_amount,
+                    "qty": 1,
+                    "unit": "fixed",
+                    "notes": exp_notes
+                })
+                st.success(f"✅ ₹{exp_amount:.0f} — {exp_cat} expense saved!")
+            else:
+                st.warning("⚠️ Amount enter pannunga")
 
-# ── Bill HTML Generator ────────────────────────────────────────────────────────
-def generate_bill_html(bill_data: dict, cart_items: list) -> str:
-    rows = ""
-    subtotal = 0
-    for i, item in enumerate(cart_items, 1):
-        amt = item["qty"] * item["price"]
-        subtotal += amt
-        rows += f"""<tr>
-          <td style='padding:6px 8px;border-bottom:1px solid #eee'>{i}</td>
-          <td style='padding:6px 8px;border-bottom:1px solid #eee'>{item['dish']}</td>
-          <td style='padding:6px 8px;border-bottom:1px solid #eee;text-align:center'>{item['qty']}</td>
-          <td style='padding:6px 8px;border-bottom:1px solid #eee;text-align:right'>₹{item['price']:.0f}</td>
-          <td style='padding:6px 8px;border-bottom:1px solid #eee;text-align:right'>₹{amt:.0f}</td>
-        </tr>"""
-    html = f"""<!DOCTYPE html>
-<html><head><meta charset='UTF-8'>
-<style>
-  body{{font-family:Arial,sans-serif;max-width:420px;margin:auto;padding:20px;color:#222}}
-  h2{{text-align:center;color:#e65c00;margin:0}}
-  .sub{{text-align:center;color:#888;font-size:12px;margin-bottom:16px}}
-  table{{width:100%;border-collapse:collapse;font-size:13px}}
-  th{{background:#e65c00;color:#fff;padding:8px;text-align:left}}
-  .total{{font-size:16px;font-weight:bold;text-align:right;padding:10px 8px}}
-  .footer{{text-align:center;margin-top:20px;font-size:11px;color:#aaa}}
-  .info{{font-size:12px;margin-bottom:12px;line-height:1.8}}
-</style></head><body>
-<h2>🍽️ LALALA Cloud Kitchen</h2>
-<div class='sub'>Signature Kitchen</div>
-<hr/>
-<div class='info'>
-  <b>Bill No:</b> {bill_data.get('bill_number','')}<br/>
-  <b>Date:</b> {bill_data.get('date','')}<br/>
-  <b>Customer:</b> {bill_data.get('customer_name','')}<br/>
-  <b>Phone:</b> {bill_data.get('phone_number','')}<br/>
-  <b>Platform:</b> {bill_data.get('platform','')}<br/>
-  <b>Payment:</b> {bill_data.get('payment_mode','')}
-</div>
-<table>
-  <tr><th>#</th><th>Item</th><th>Qty</th><th>Rate</th><th>Amount</th></tr>
-  {rows}
-  <tr><td colspan='4' class='total'>Total</td><td class='total'>₹{subtotal:.0f}</td></tr>
-</table>
-<div class='footer'>Thank you for your order! 🙏<br/>LALALA Cloud Kitchen</div>
-</body></html>"""
-    return html
+        # Show recent fixed expenses
+        st.divider()
+        st.markdown("#### Recent Fixed Expenses")
+        acc_data = fetch_all("accounts")
+        fixed_exp = [a for a in acc_data if a.get("category") in ["Rent","EB Bill","Salary","Transport","Other"]]
+        if fixed_exp:
+            st.dataframe(pd.DataFrame(fixed_exp)[["date","category","amount","notes"]].sort_values("date", ascending=False).head(20),
+                         use_container_width=True)
 
-def whatsapp_share_url(phone: str, bill_number: str, amount: float) -> str:
-    if not phone or phone == "N/A":
-        return ""
-    clean_phone = "91" + phone.strip()
-    msg = f"Hi! Your order at LALALA Cloud Kitchen is confirmed 🍽️%0ABill No: {bill_number}%0AAmount: ₹{amount:.0f}%0AThank you!"
-    return f"https://wa.me/{clean_phone}?text={msg}"
+    # ── Pending Credit Dashboard ──────────────────────────────────────────────
+    elif tab == "💳 Pending Credit Dashboard":
+        st.markdown("### 💳 Pending Credit Dashboard")
+
+        orders = fetch_all("orders")
+        acc_data = fetch_all("accounts")
+
+        credit_orders = [o for o in orders if o.get("payment_mode") == "Credit"]
+
+        # Calculate recovered amounts per bill
+        recovered_map = {}
+        for a in acc_data:
+            if a.get("category") == "Credit Recovery":
+                bill = a.get("notes", "")
+                recovered_map[bill] = recovered_map.get(bill, 0) + float(a.get("amount", 0))
+
+        pending = []
+        for o in credit_orders:
+            total_amt = float(o.get("amount", 0))
+            recovered = recovered_map.get(o.get("bill_number", ""), 0)
+            balance   = total_amt - recovered
+            if balance > 0:
+                pending.append({
+                    "Bill No": o.get("bill_number"),
+                    "Date": o.get("date"),
+                    "Customer": o.get("customer_name"),
+                    "Phone": o.get("phone_number"),
+                    "Platform": o.get("platform"),
+                    "Total (₹)": total_amt,
+                    "Recovered (₹)": recovered,
+                    "Balance (₹)": round(balance, 2)
+                })
+
+        if pending:
+            pending_df = pd.DataFrame(pending)
+            total_pending = pending_df["Balance (₹)"].sum()
+            st.metric("💸 Total Pending Credit", f"₹{total_pending:,.2f}")
+            st.dataframe(pending_df, use_container_width=True)
+        else:
+            st.success("✅ No pending credits!")
+
+        st.divider()
+        st.markdown("#### 💰 Record Credit Recovery")
+        col1, col2 = st.columns(2)
+        with col1:
+            rec_date = st.date_input("📅 Date", value=date.today(), key="rec_date")
+            client_options = list(set([p["Bill No"] for p in pending])) if pending else []
+            sel_bill = st.selectbox("Select Bill", client_options if client_options else ["No pending credits"], key="rec_bill")
+        with col2:
+            rec_amount = st.number_input("Amount Recovered (₹)", min_value=0.0, step=10.0, key="rec_amt")
+
+        if st.button("✅ Submit Recovery", type="primary", use_container_width=True):
+            if rec_amount > 0 and sel_bill and sel_bill != "No pending credits":
+                insert_row("accounts", {
+                    "date": str(rec_date),
+                    "type": "Revenue",
+                    "category": "Credit Recovery",
+                    "item_name": "Credit Recovery",
+                    "amount": rec_amount,
+                    "qty": 1,
+                    "unit": "bill",
+                    "notes": sel_bill
+                })
+                st.success(f"✅ ₹{rec_amount:.0f} recovery recorded for {sel_bill}!")
+                st.rerun()
+
+    # ── Channel Payout Settlements ────────────────────────────────────────────
+    elif tab == "📱 Channel Payout Settlements":
+        st.markdown("### 📱 Platform Payout Settlement")
+        st.caption("Swiggy/Zomato settlement Wednesday select pannunga — sale window automatic aa calculate aagum")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            platform_sel = st.selectbox("Platform", ["Swiggy", "Zomato"], key="pay_platform")
+        with col2:
+            settlement_date = st.date_input("📅 Settlement Date (Wednesday)", value=date.today(), key="pay_settle_date")
+
+        if settlement_date.weekday() != 2:  # Monday=0 ... Wednesday=2
+            st.warning("⚠️ Settlement date Wednesday ah select pannunga (Swiggy/Zomato Wednesday than settle pannuvanga)")
+
+        # ── Auto-calculate sale window based on platform pattern ─────────────────
+        if platform_sel == "Swiggy":
+            # Sun-Sat sales -> next Wednesday settlement (4 days after Saturday)
+            from_date = settlement_date - timedelta(days=10)  # Sunday
+            to_date   = settlement_date - timedelta(days=4)   # Saturday
+        else:  # Zomato
+            # Mon-Sun sales -> next Wednesday settlement (3 days after Sunday)
+            from_date = settlement_date - timedelta(days=9)   # Monday
+            to_date   = settlement_date - timedelta(days=3)   # Sunday
+
+        st.info(f"🗓️ Sale Window: **{from_date.strftime('%d-%b (%a)')} → {to_date.strftime('%d-%b (%a)')}** "
+                f"({(to_date - from_date).days + 1} days) → Settlement on **{settlement_date.strftime('%d-%b (%a)')}**")
+
+        orders = fetch_all("orders")
+        filtered = [o for o in orders if
+                    o.get("platform") == platform_sel and
+                    str(from_date) <= str(o.get("date", "")) <= str(to_date)]
+
+        total_order_value = sum(float(o.get("amount", 0)) for o in filtered)
+        num_orders = len(filtered)
+
+        st.divider()
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.metric(f"📦 {platform_sel} Orders", num_orders)
+            st.metric("💰 Total Order Value", f"₹{total_order_value:,.2f}")
+        with col_b:
+            bank_payout = st.number_input("🏦 Actual Bank Payout Received (₹)", min_value=0.0, step=10.0, key="bank_payout")
+
+        if bank_payout > 0:
+            commission = total_order_value - bank_payout
+            comm_pct   = (commission / total_order_value * 100) if total_order_value > 0 else 0
+            st.metric("💸 Platform Commission", f"₹{commission:,.2f}", delta=f"-{comm_pct:.1f}%")
+
+            if st.button(f"✅ Record {platform_sel} Payout Settlement", type="primary", use_container_width=True):
+                # Revenue entry
+                insert_row("accounts", {
+                    "date": str(settlement_date),
+                    "type": "Revenue",
+                    "category": f"{platform_sel} Payout",
+                    "item_name": f"{platform_sel} Settlement",
+                    "amount": bank_payout,
+                    "qty": num_orders,
+                    "unit": "orders",
+                    "notes": f"Sales {from_date} to {to_date} | Orders: ₹{total_order_value:.2f} | Commission: ₹{commission:.2f} ({comm_pct:.1f}%)"
+                })
+                # Commission expense entry
+                insert_row("accounts", {
+                    "date": str(settlement_date),
+                    "type": "Expense",
+                    "category": "Platform Commission",
+                    "item_name": f"{platform_sel} Commission",
+                    "amount": commission,
+                    "qty": num_orders,
+                    "unit": "orders",
+                    "notes": f"Sales {from_date} to {to_date} | {comm_pct:.1f}% commission"
+                })
+                st.success(f"✅ {platform_sel} settlement recorded! Revenue: ₹{bank_payout:.2f}, Commission: ₹{commission:.2f}")
+
+        # Outstanding display
+        st.divider()
+        st.markdown(f"#### 🔴 {platform_sel} Outstanding (Unsettled Orders)")
+        acc_data = fetch_all("accounts")
+        settled_amounts = sum(float(a.get("amount",0)) for a in acc_data
+                              if a.get("category") == f"{platform_sel} Payout")
+        all_platform_orders = [o for o in orders if o.get("platform") == platform_sel]
+        all_platform_total  = sum(float(o.get("amount",0)) for o in all_platform_orders)
+        outstanding = max(0, all_platform_total - settled_amounts)
+        st.metric(f"💸 {platform_sel} Outstanding", f"₹{outstanding:,.2f}")
