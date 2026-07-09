@@ -2,7 +2,10 @@ import streamlit as st
 import pandas as pd
 from datetime import date
 from utils.db import fetch_all, insert_row, update_row
-from utils.helpers import deduct_stock_via_bom, get_bom_cost
+from utils.helpers import (
+    deduct_stock_via_bom, get_bom_cost,
+    normalize_base_unit, get_purchase_unit_options, convert_to_base_qty,
+)
 
 def wastage_page():
     st.markdown("## 🗑️ Wastage Entry")
@@ -28,52 +31,44 @@ def wastage_page():
         with col1:
             waste_date = st.date_input("📅 Date", value=date.today(), key="rm_date")
             item_sel   = st.selectbox("🧂 Ingredient", sku_names, key="rm_item")
+
+        # Base unit fixed per ingredient — only compatible conversion units shown
+        base_unit    = normalize_base_unit(sku_map.get(item_sel, {}).get("Purchase unit", "gm")) if item_sel else "gm"
+        unit_options = get_purchase_unit_options(base_unit)
+
         with col2:
             waste_qty  = st.number_input("Quantity Lost", min_value=0.0, step=0.1, key="rm_qty")
-            waste_unit = st.selectbox("Unit", ["gm", "ml", "kg", "litre", "nos"], key="rm_unit")
+            waste_unit = st.selectbox("Unit", unit_options, key="rm_unit")
 
         reason = st.text_input("📝 Reason", placeholder="Expired / Spoiled / Spillage", key="rm_reason")
 
+        loss_value = 0.0
+        qty_norm = 0.0
         if item_sel:
             sku = sku_map.get(item_sel, {})
-            market_price = float(sku.get("Market Price", 0))
-            sku_unit     = sku.get("Purchase unit", "gm")
-            # normalize loss qty
-            if waste_unit in ["kg", "litre"] and sku_unit in ["gm", "ml"]:
-                qty_norm = waste_qty * 1000
-            else:
-                qty_norm = waste_qty
-            # price per base unit
-            if sku_unit in ["gm", "ml"]:
-                price_per = market_price / 1000
-            else:
-                price_per = market_price
-            loss_value = round(qty_norm * price_per, 2)
-            st.info(f"💸 Estimated Loss Value: ₹{loss_value:.2f} (@ ₹{market_price}/{sku_unit})")
+            market_price = float(sku.get("Market Price", 0) or 0)  # already ₹ per base unit
+            qty_norm = convert_to_base_qty(waste_qty, waste_unit, base_unit)
+            loss_value = round(qty_norm * market_price, 2)
+            st.info(f"💸 Estimated Loss Value: ₹{loss_value:.2f} (@ ₹{market_price:.3f}/{base_unit})")
 
         if st.button("✅ Record Raw Material Loss", type="primary", use_container_width=True):
             if waste_qty > 0 and item_sel:
                 sku = sku_map.get(item_sel, {})
-                current_stock = float(sku.get("current_stock", 0))
-                # normalize
-                if waste_unit in ["kg", "litre"] and sku.get("Purchase unit","gm") in ["gm","ml"]:
-                    qty_norm = waste_qty * 1000
-                else:
-                    qty_norm = waste_qty
+                current_stock = float(sku.get("current_stock", 0) or 0)
                 new_stock = max(0, current_stock - qty_norm)
                 update_row("sku_master", "Ingerdient Name", item_sel, {"current_stock": round(new_stock, 3)})
-                # Expense entry
+                # Expense entry — logged in base unit, kg/litre never stored
                 insert_row("accounts", {
                     "date": str(waste_date),
                     "type": "Expense",
                     "category": "Wastage",
                     "item_name": item_sel,
                     "amount": loss_value,
-                    "qty": waste_qty,
-                    "unit": waste_unit,
-                    "notes": f"Raw material loss | {reason or 'No reason given'}"
+                    "qty": round(qty_norm, 3),
+                    "unit": base_unit,
+                    "notes": f"Raw material loss | {waste_qty}{waste_unit} ({qty_norm:.0f}{base_unit}) | {reason or 'No reason given'}"
                 })
-                st.success(f"✅ {item_sel} — {waste_qty}{waste_unit} loss recorded. Stock updated.")
+                st.success(f"✅ {item_sel} — {waste_qty}{waste_unit} = {qty_norm:.0f}{base_unit} loss recorded. Stock updated.")
             else:
                 st.warning("⚠️ Quantity enter pannunga")
 
