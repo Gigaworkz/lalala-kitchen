@@ -16,7 +16,7 @@ def inventory_page():
     # ── Low Stock Warning Banner ──────────────────────────────────────────────
     low_items = get_low_stock_items()
     if low_items:
-        st.error(f"🚨 {len(low_items)} item(s) minimum stock kila irukku — Purchase list check pannunga!")
+        st.error(f"🚨 {len(low_items)} item(s) minimum stock kila irukku — Purchase list check please!")
 
     # ── Total Inventory Worth ─────────────────────────────────────────────────
     worth = get_inventory_worth()
@@ -50,7 +50,7 @@ def inventory_page():
 
     # ── Purchase List Generator (interactive, report-only, no DB writes) ──────
     st.markdown("### 🛒 Generate Purchase List")
-    st.caption("Click Generate — low stock items auto-fill aagum. Apparam edit/add/remove ellame idhே report ku mattum, Supabase la edhuvும் change aagathu.")
+    st.caption("Generate Purchase List — low stock items auto-show aagum. edit/add/remove only for PO report ku mattum ")
 
     if "purchase_list" not in st.session_state:
         st.session_state.purchase_list = {}       # {ingredient_name: qty} — report-only, never saved to DB
@@ -80,7 +80,7 @@ def inventory_page():
                 st.rerun()
 
     if not st.session_state.purchase_list_active:
-        st.info("Generate Purchase List click pannunga — low stock items ah kaatti report start pannalam.")
+        st.info("After complete Purchase List can share by Whatsapp")
     else:
         # ➕ Add any item manually — report list ku mattum, DB touch illa
         st.markdown("**➕ Add Item** (report-ku mattum, SKU master la edhuvும் save aagathu)")
