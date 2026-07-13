@@ -149,8 +149,36 @@ def add_stock_purchase(ingredient: str, qty: float, unit: str, total_amount: flo
         "current_stock": round(new_stock, 3),
         "Market Price": round(price_per_base_unit, 4),
         "Purchase unit": base_unit,  # self-heals any legacy kg/litre value
+        "price note": f"per 1 {base_unit}",  # removes ambiguity — always per 1 base unit now
     })
     return True, qty_base, base_unit
+
+# ── One-Time Legacy Price Correction ───────────────────────────────────────────
+def correct_market_price(ingredient: str, reference_amount: float, reference_qty: float, reference_unit: str):
+    """For SKU rows whose Market Price was entered under an old convention
+    (e.g. '₹90 for 100 gm', reflected only in the free-text price note),
+    this recalculates the correct per-base-unit price from a known real-world
+    reference and fixes both Market Price and price note in one shot.
+
+    Example: reference_amount=90, reference_qty=100, reference_unit='gm'
+    (i.e. "₹90 per 100 gm") on an ingredient whose base unit is gm →
+    stores Market Price = 0.9 (₹ per 1 gm), price note = 'per 1 gm'."""
+    sku_data = fetch_where("sku_master", "Ingerdient Name", ingredient)
+    if not sku_data:
+        return False, 0, ""
+    sku = sku_data[0]
+    base_unit = normalize_base_unit(sku.get("Purchase unit", "gm"))
+    qty_base = convert_to_base_qty(reference_qty, reference_unit, base_unit)
+    if qty_base <= 0:
+        return False, 0, base_unit
+
+    price_per_base_unit = reference_amount / qty_base
+    update_row("sku_master", "Ingerdient Name", ingredient, {
+        "Market Price": round(price_per_base_unit, 4),
+        "Purchase unit": base_unit,
+        "price note": f"per 1 {base_unit}",
+    })
+    return True, round(price_per_base_unit, 4), base_unit
 
 # ── Low Stock Items ────────────────────────────────────────────────────────────
 def get_low_stock_items():
