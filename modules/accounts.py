@@ -83,7 +83,9 @@ def accounts_page():
         col1, col2 = st.columns(2)
         with col1:
             exp_date = st.date_input("📅 Date", value=date.today(), key="fix_date")
-            exp_cat  = st.selectbox("Category", ["Rent", "EB Bill", "Salary", "Transport", "Other"], key="fix_cat")
+            exp_cat  = st.selectbox("Category", ["Rent", "EB Bill", "Salary", "Transport", "Gas Bill",
+                                                  "Water Bill", "Wifi Bill", "Advertisement", "Maintenance",
+                                                  "Other"], key="fix_cat")
         with col2:
             exp_amount = st.number_input("Amount (₹)", min_value=0.0, step=10.0, key="fix_amt")
             exp_notes  = st.text_input("📝 Notes", key="fix_notes")
@@ -108,7 +110,8 @@ def accounts_page():
         st.divider()
         st.markdown("#### Recent Fixed Expenses")
         acc_data = fetch_all("accounts")
-        fixed_exp = [a for a in acc_data if a.get("category") in ["Rent","EB Bill","Salary","Transport","Other"]]
+        fixed_exp = [a for a in acc_data if a.get("category") in
+                     ["Rent","EB Bill","Salary","Transport","Gas Bill","Water Bill","Wifi Bill","Advertisement","Maintenance","Other"]]
         if fixed_exp:
             st.dataframe(pd.DataFrame(fixed_exp)[["date","category","amount","notes"]].sort_values("date", ascending=False).head(20),
                          use_container_width=True)
