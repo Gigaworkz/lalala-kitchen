@@ -61,7 +61,7 @@ def wastage_page():
                 insert_row("accounts", {
                     "date": str(waste_date),
                     "type": "Expense",
-                    "category": "Wastage",
+                    "category": "Raw Material Loss",
                     "item_name": item_sel,
                     "amount": loss_value,
                     "qty": round(qty_norm, 3),
@@ -103,7 +103,7 @@ def wastage_page():
                 insert_row("accounts", {
                     "date": str(waste_date),
                     "type": "Expense",
-                    "category": "Wastage",
+                    "category": "Cooked Item Waste",
                     "item_name": dish_sel,
                     "amount": round(total_loss, 2),
                     "qty": waste_qty,
@@ -162,7 +162,8 @@ def wastage_page():
     st.divider()
     with st.expander("📋 Wastage History"):
         acc_data = fetch_all("accounts")
-        waste_records = [a for a in acc_data if a.get("category") in ["Wastage", "Complimentary"]]
+        waste_records = [a for a in acc_data if a.get("category") in
+                          ["Raw Material Loss", "Cooked Item Waste", "Complimentary", "Wastage"]]
         if waste_records:
             df = pd.DataFrame(waste_records)[["date","category","item_name","amount","qty","unit","notes"]]
             df = df.sort_values("date", ascending=False)
