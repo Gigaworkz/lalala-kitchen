@@ -106,7 +106,13 @@ def billing_page():
                     st.session_state.cart.pop(i)
                     st.rerun()
 
-        st.markdown(f"### 💰 Total: ₹{total:.0f}")
+        st.markdown(f"### 💰 Subtotal: ₹{total:.0f}")
+        discount = st.number_input("🏷️ Discount (₹)", min_value=0.0, max_value=float(total),
+                                    value=0.0, step=1.0, key="discount_input")
+        net_total = total - discount
+        if discount > 0:
+            st.markdown(f"**Discount: −₹{discount:.0f}**")
+            st.markdown(f"### 💰 Net Total: ₹{net_total:.0f}")
 
         st.divider()
 
@@ -125,7 +131,7 @@ def billing_page():
                 "phone_number": phone_final,
                 "platform": platform,
                 "payment_mode": payment_mode,
-                "amount": total,
+                "amount": net_total,
                 "items_summary": items_summary
             }
             insert_row("orders", order_data)
@@ -137,10 +143,23 @@ def billing_page():
                     "type": "Revenue",
                     "category": "Sales",
                     "item_name": f"Bill {st.session_state.bill_number}",
-                    "amount": total,
+                    "amount": net_total,
                     "qty": 1,
                     "unit": "bill",
                     "notes": f"{platform} | {payment_mode} | {items_summary}"
+                })
+
+            # 2b. Discount logged separately so it can be tracked in P&L
+            if discount > 0:
+                insert_row("accounts", {
+                    "date": str(bill_date),
+                    "type": "Expense",
+                    "category": "Discount",
+                    "item_name": f"Bill {st.session_state.bill_number}",
+                    "amount": discount,
+                    "qty": 1,
+                    "unit": "bill",
+                    "notes": f"Discount on {platform} bill | {items_summary}"
                 })
 
             # 3. Deduct stock via BOM
@@ -162,7 +181,12 @@ def billing_page():
                 "platform": platform,
                 "payment_mode": payment_mode
             }
-            html_bill = generate_bill_html(bill_info, st.session_state.cart)
+            # Add a negative "Discount" line so the printed bill's total nets out correctly
+            # without needing to touch the shared generate_bill_html helper.
+            cart_for_bill = list(st.session_state.cart)
+            if discount > 0:
+                cart_for_bill.append({"dish": "Discount", "qty": 1, "price": -discount})
+            html_bill = generate_bill_html(bill_info, cart_for_bill)
 
             col_p, col_w = st.columns(2)
             with col_p:
@@ -170,7 +194,7 @@ def billing_page():
                                    file_name=f"{st.session_state.bill_number}.html",
                                    mime="text/html", use_container_width=True)
             with col_w:
-                wa_url = whatsapp_share_url(phone_final, st.session_state.bill_number, total)
+                wa_url = whatsapp_share_url(phone_final, st.session_state.bill_number, net_total)
                 if wa_url:
                     st.link_button("📲 Share on WhatsApp", wa_url, use_container_width=True)
 
@@ -179,6 +203,7 @@ def billing_page():
             st.session_state.bill_number = generate_bill_number()
             st.session_state.pop("autofill_name", None)
             st.session_state.pop("autofill_phone", None)
+            st.session_state.pop("discount_input", None)
 
     else:
         st.info("🛒 Cart empty — dishes add pannunga")
